@@ -317,6 +317,9 @@ guard.Add("researcher", llmResearcher, contextguard.WithSlidingWindow(30))
 
 // Manual context window override — bypasses the registry for this agent
 guard.Add("writer", llmWriter, contextguard.WithMaxTokens(1_000_000))
+
+// Custom compaction retry limit (default: 3) — applies to both strategies
+guard.Add("analyst", llmAnalyst, contextguard.WithMaxCompactionAttempts(5))
 ```
 
 Multi-agent setup is the same API — just call `Add` multiple times:
@@ -360,8 +363,9 @@ guard.Add("assistant", llmModel)
 2. **Threshold**: estimates total tokens and triggers summarization when remaining capacity drops below a safety buffer (fixed 20k for windows >200k, 20% for smaller ones)
 3. **Sliding window**: counts Content entries since the last compaction and triggers when the limit is exceeded
 4. When triggered, the conversation is split into "old" (summarized by the agent's own LLM) and "recent" (kept verbatim)
-5. The summary is persisted in session state and injected on subsequent requests until the next compaction
-6. Tool call chains (`tool_use` + `tool_result`) are never split mid-chain to prevent provider errors
+5. Both strategies retry compaction up to 3 times (`maxCompactionAttempts`) if the resulting summary still exceeds the threshold. After exhausting all attempts the request is sent as-is (best-effort)
+6. The summary is persisted in session state and injected on subsequent requests until the next compaction
+7. Tool call chains (`tool_use` + `tool_result`) are never split mid-chain to prevent provider errors
 
 ## Examples
 

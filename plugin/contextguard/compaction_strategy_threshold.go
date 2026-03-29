@@ -34,19 +34,21 @@ import (
 // Compaction always produces a full summary (no recent tail preserved),
 // matching Crush CLI behaviour. The result is [summary] + [continuation].
 type thresholdStrategy struct {
-	registry  ModelRegistry
-	llm       model.LLM
-	maxTokens int
-	mu        sync.Mutex
+	registry    ModelRegistry
+	llm         model.LLM
+	maxTokens   int
+	maxCompactionAttempts int
+	mu          sync.Mutex
 }
 
 // newThresholdStrategy creates a threshold strategy. If maxTokens > 0 it
 // overrides the registry lookup for the context window size.
-func newThresholdStrategy(registry ModelRegistry, llm model.LLM, maxTokens int) *thresholdStrategy {
+func newThresholdStrategy(registry ModelRegistry, llm model.LLM, maxTokens int, maxCompactionAttempts int) *thresholdStrategy {
 	return &thresholdStrategy{
-		registry:  registry,
-		llm:       llm,
-		maxTokens: maxTokens,
+		registry:    registry,
+		llm:         llm,
+		maxTokens:   maxTokens,
+		maxCompactionAttempts: maxCompactionAttempts,
 	}
 }
 
@@ -82,50 +84,68 @@ func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMReq
 		return nil
 	}
 
-	slog.Info("ContextGuard [threshold]: threshold exceeded, summarizing",
-		"agent", ctx.AgentName(),
-		"session", ctx.SessionID(),
-		"tokens", totalTokens,
-		"threshold", threshold,
-		"contextWindow", contextWindow,
-		"buffer", buffer,
-		"maxSummaryWords", int(float64(buffer)*0.50*0.75),
-	)
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	userContent := ctx.UserContent()
 	todos := loadTodos(ctx)
 
-	contentsForSummary := truncateForSummarizer(req.Contents, contextWindow)
-
-	summary, err := summarize(ctx, s.llm, contentsForSummary, existingSummary, buffer, todos)
-	if err != nil {
-		slog.Warn("ContextGuard [threshold]: summarization failed, using fallback",
+	for attempt := range s.maxCompactionAttempts {
+		slog.Info("ContextGuard [threshold]: threshold exceeded, summarizing",
 			"agent", ctx.AgentName(),
 			"session", ctx.SessionID(),
-			"error", err,
+			"attempt", attempt+1,
+			"tokens", totalTokens,
+			"threshold", threshold,
+			"contextWindow", contextWindow,
+			"buffer", buffer,
+			"maxSummaryWords", int(float64(buffer)*0.50*0.75),
 		)
-		summary = buildFallbackSummary(contentsForSummary, existingSummary)
+
+		contentsForSummary := truncateForSummarizer(req.Contents, contextWindow)
+
+		summary, err := summarize(ctx, s.llm, contentsForSummary, existingSummary, buffer, todos)
+		if err != nil {
+			slog.Warn("ContextGuard [threshold]: summarization failed, using fallback",
+				"agent", ctx.AgentName(),
+				"session", ctx.SessionID(),
+				"error", err,
+			)
+			summary = buildFallbackSummary(contentsForSummary, existingSummary)
+		}
+
+		existingSummary = summary
+		persistSummary(ctx, summary, totalTokens)
+		persistContentsAtCompaction(ctx, totalSessionContents)
+		replaceSummary(req, summary, nil)
+		injectContinuation(req, userContent)
+
+		resetCalibration(ctx)
+
+		newTokens := estimateTokens(req)
+
+		slog.Info("ContextGuard [threshold]: compaction pass completed",
+			"agent", ctx.AgentName(),
+			"session", ctx.SessionID(),
+			"attempt", attempt+1,
+			"oldMessages", len(req.Contents),
+			"newTokenEstimate", newTokens,
+			"threshold", threshold,
+		)
+
+		if newTokens < threshold {
+			break
+		}
+
+		if attempt < s.maxCompactionAttempts-1 {
+			slog.Warn("ContextGuard [threshold]: still above threshold after compaction, retrying",
+				"agent", ctx.AgentName(),
+				"attempt", attempt+1,
+				"tokens", newTokens,
+				"threshold", threshold,
+			)
+		}
 	}
-
-	persistSummary(ctx, summary, totalTokens)
-	persistContentsAtCompaction(ctx, totalSessionContents)
-	replaceSummary(req, summary, nil)
-	injectContinuation(req, userContent)
-
-	resetCalibration(ctx)
-
-	newTokens := estimateTokens(req)
-
-	slog.Info("ContextGuard [threshold]: compaction completed",
-		"agent", ctx.AgentName(),
-		"session", ctx.SessionID(),
-		"oldMessages", len(req.Contents),
-		"newTokenEstimate", newTokens,
-		"threshold", threshold,
-	)
 
 	return nil
 }
