@@ -223,6 +223,59 @@ func (s *FilesystemService) Versions(_ context.Context, req *artifact.VersionsRe
 	return &artifact.VersionsResponse{Versions: versions}, nil
 }
 
+// GetArtifactVersion implements artifact.Service. Returns the metadata for a
+// specific version of an artifact (or the latest version when req.Version <= 0).
+func (s *FilesystemService) GetArtifactVersion(_ context.Context, req *artifact.GetArtifactVersionRequest) (*artifact.GetArtifactVersionResponse, error) {
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("request validation failed: %w", err)
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	version := req.Version
+	if version <= 0 {
+		dir := s.artifactDir(req.AppName, req.UserID, req.SessionID, req.FileName)
+		latest, err := s.latestVersion(dir)
+		if err != nil {
+			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
+		}
+		version = latest
+	}
+
+	path := s.versionPath(req.AppName, req.UserID, req.SessionID, req.FileName, version)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
+		}
+		return nil, fmt.Errorf("failed to read artifact: %w", err)
+	}
+
+	var part genai.Part
+	if err := json.Unmarshal(data, &part); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal artifact: %w", err)
+	}
+
+	mimeType := "text/plain"
+	if part.InlineData != nil && part.InlineData.MIMEType != "" {
+		mimeType = part.InlineData.MIMEType
+	}
+
+	var createTime float64
+	if info, err := os.Stat(path); err == nil {
+		createTime = float64(info.ModTime().UnixNano()) / 1e9
+	}
+
+	return &artifact.GetArtifactVersionResponse{
+		ArtifactVersion: &artifact.ArtifactVersion{
+			Version:    version,
+			MimeType:   mimeType,
+			CreateTime: createTime,
+		},
+	}, nil
+}
+
 func (s *FilesystemService) latestVersion(dir string) (int64, error) {
 	versions, err := s.listVersions(dir)
 	if err != nil || len(versions) == 0 {
