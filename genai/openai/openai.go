@@ -157,18 +157,45 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 			chunk := stream.Current()
 			acc.AddChunk(chunk)
 
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				llmResp := &model.LLMResponse{
-					Content: &genai.Content{
-						Role:  genai.RoleModel,
-						Parts: []*genai.Part{{Text: chunk.Choices[0].Delta.Content}},
-					},
-					Partial:      true,
-					TurnComplete: false,
-				}
-				if !yield(llmResp, nil) {
-					return
-				}
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+
+			delta := chunk.Choices[0].Delta
+			// reasoning_content is a non-standard field used by OpenAI-compatible
+			// providers (Kimi K2.6, DeepSeek-R1, Qwen3-Thinking, etc.) to stream
+			// hidden chain-of-thought tokens. The official OpenAI schema does not
+			// include it, so it is read from the raw JSON envelope rather than a
+			// typed field on Delta. See extractReasoningContent for details.
+			reasoning := extractReasoningContent(delta.RawJSON())
+
+			if delta.Content == "" && reasoning == "" {
+				continue
+			}
+
+			// Order is significant: reasoning tokens are emitted before the
+			// final answer tokens, so the Part order mirrors the temporal
+			// order in which the model produced them. Downstream consumers
+			// (e.g. ADK's llmagent) iterate parts and filter on Thought, so
+			// having reasoning first matches the natural transcript order.
+			var parts []*genai.Part
+			if reasoning != "" {
+				parts = append(parts, &genai.Part{Text: reasoning, Thought: true})
+			}
+			if delta.Content != "" {
+				parts = append(parts, &genai.Part{Text: delta.Content})
+			}
+
+			llmResp := &model.LLMResponse{
+				Content: &genai.Content{
+					Role:  genai.RoleModel,
+					Parts: parts,
+				},
+				Partial:      true,
+				TurnComplete: false,
+			}
+			if !yield(llmResp, nil) {
+				return
 			}
 		}
 
@@ -191,6 +218,14 @@ func (m *Model) buildStreamFinalResponse(acc *openai.ChatCompletionAccumulator) 
 
 	if len(acc.Choices) > 0 {
 		choice := acc.Choices[0]
+
+		// Same rationale as in generateStream: read reasoning_content from the
+		// raw JSON since openai-go does not type the non-standard field.
+		// Reasoning Part goes before the final-answer Part to preserve the
+		// temporal order in which the model produced the tokens.
+		if reasoning := extractReasoningContent(choice.Message.RawJSON()); reasoning != "" {
+			content.Parts = append(content.Parts, &genai.Part{Text: reasoning, Thought: true})
+		}
 
 		if choice.Message.Content != "" {
 			content.Parts = append(content.Parts, &genai.Part{Text: choice.Message.Content})
@@ -474,6 +509,13 @@ func (m *Model) convertResponse(resp *openai.ChatCompletion) (*model.LLMResponse
 		Parts: []*genai.Part{},
 	}
 
+	// Same rationale as in buildStreamFinalResponse: read reasoning_content
+	// from the raw JSON since openai-go does not type the non-standard field
+	// used by OpenAI-compatible reasoning providers.
+	if reasoning := extractReasoningContent(choice.Message.RawJSON()); reasoning != "" {
+		content.Parts = append(content.Parts, &genai.Part{Text: reasoning, Thought: true})
+	}
+
 	if choice.Message.Content != "" {
 		content.Parts = append(content.Parts, &genai.Part{Text: choice.Message.Content})
 	}
@@ -729,6 +771,15 @@ func convertInlineDataToPart(data *genai.Blob) (*openai.ChatCompletionContentPar
 }
 
 // convertUsageMetadata converts OpenAI usage stats to genai format.
+//
+// CompletionTokensDetails.ReasoningTokens is the count of hidden reasoning
+// tokens billed as output tokens by OpenAI reasoning models (o-series,
+// gpt-5.x) and by OpenAI-compatible providers exposing reasoning (DeepSeek,
+// Kimi K2/K2.6, Qwen3-Thinking). It is a documented part of the official
+// Chat Completions schema, so we always map it to genai's ThoughtsTokenCount
+// regardless of whether the provider also returns reasoning text. When the
+// provider does not emit reasoning tokens the field is zero, and genai
+// serialisation omits it via `omitempty`.
 func convertUsageMetadata(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
 	if usage.TotalTokens == 0 {
 		return nil
@@ -737,7 +788,40 @@ func convertUsageMetadata(usage openai.CompletionUsage) *genai.GenerateContentRe
 		PromptTokenCount:     int32(usage.PromptTokens),
 		CandidatesTokenCount: int32(usage.CompletionTokens),
 		TotalTokenCount:      int32(usage.TotalTokens),
+		ThoughtsTokenCount:   int32(usage.CompletionTokensDetails.ReasoningTokens),
 	}
+}
+
+// extractReasoningContent reads the non-standard "reasoning_content" field
+// from the SDK's raw JSON envelope.
+//
+// The OpenAI Chat Completions schema does NOT include a "reasoning_content"
+// field — for OpenAI's own reasoning models (o-series, gpt-5.x) the reasoning
+// text is hidden and only the token count is reported (via
+// CompletionTokensDetails.ReasoningTokens). Reasoning *text* is only
+// available through the Responses API, which this adapter does not use.
+//
+// However, multiple OpenAI-compatible providers (DeepSeek-R1, Kimi K2/K2.6,
+// Qwen3-Thinking, etc.) extend the response with a "reasoning_content"
+// field on choices[].message and choices[].delta. openai-go does not type
+// this field but preserves it in JSON.raw, which is reachable via the
+// generated RawJSON() accessor. Parsing the raw envelope is the documented
+// way to read non-standard fields in this SDK.
+//
+// Returns "" if the field is absent, empty, or the JSON cannot be parsed —
+// callers should treat empty as "no reasoning content emitted" and skip
+// adding a thought Part.
+func extractReasoningContent(rawJSON string) string {
+	if rawJSON == "" {
+		return ""
+	}
+	var probe struct {
+		ReasoningContent string `json:"reasoning_content"`
+	}
+	if err := json.Unmarshal([]byte(rawJSON), &probe); err != nil {
+		return ""
+	}
+	return probe.ReasoningContent
 }
 
 // convertRole maps genai roles to OpenAI roles.

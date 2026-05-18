@@ -9,6 +9,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -251,4 +252,310 @@ func TestConvertThinkingLevel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// extractReasoningContent reads the non-standard "reasoning_content" field
+// from the raw JSON envelope that openai-go preserves on every typed
+// response struct. The function exists because OpenAI-compatible providers
+// (Kimi K2.6, DeepSeek-R1, Qwen3-Thinking, etc.) extend the Chat Completions
+// schema with this field, and openai-go does NOT type it — it lives only in
+// JSON.raw / ExtraFields.
+//
+// The contract is: return the field value verbatim if present and non-empty,
+// "" otherwise. Malformed JSON must yield "" rather than an error because
+// callers cannot meaningfully react to it — at the response-conversion
+// layer, dropping a thought Part is the safe degradation.
+func TestExtractReasoningContent(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "empty raw returns empty",
+			raw:  "",
+			want: "",
+		},
+		{
+			name: "raw without reasoning_content returns empty",
+			raw:  `{"role":"assistant","content":"hello"}`,
+			want: "",
+		},
+		{
+			name: "raw with reasoning_content returns the value",
+			raw:  `{"role":"assistant","content":"hello","reasoning_content":"thinking step by step"}`,
+			want: "thinking step by step",
+		},
+		{
+			name: "raw with empty reasoning_content returns empty",
+			raw:  `{"role":"assistant","content":"hello","reasoning_content":""}`,
+			want: "",
+		},
+		{
+			name: "malformed JSON returns empty rather than panicking",
+			raw:  `{"role":"assistant"`,
+			want: "",
+		},
+		{
+			name: "reasoning_content of wrong type (non-string) returns empty",
+			raw:  `{"reasoning_content":123}`,
+			want: "",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := extractReasoningContent(c.raw); got != c.want {
+				t.Errorf("extractReasoningContent(%q) = %q, want %q", c.raw, got, c.want)
+			}
+		})
+	}
+}
+
+// convertResponse must surface reasoning_content as a separate Part with
+// Thought=true so downstream consumers (Google ADK's llmagent pipeline,
+// which filters `if part.Text != "" && !part.Thought`) can distinguish
+// chain-of-thought tokens from the final answer.
+//
+// Tests below build the response via json.Unmarshal because openai-go
+// stores the raw JSON envelope in an unexported `JSON.raw` field, populated
+// only by the generated UnmarshalJSON. Constructing the struct literally
+// would leave RawJSON() empty and bypass the field we are testing — a
+// false-positive trap that would let a regression slip through.
+func TestConvertResponse_WithReasoningContent(t *testing.T) {
+	t.Run("reasoning_content yields a leading Thought part", func(t *testing.T) {
+		raw := []byte(`{
+            "id": "chatcmpl-x",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "kimi-k2.6",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "The answer is 42.",
+                    "reasoning_content": "User asked for the meaning of life. The canonical joke answer is 42."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+        }`)
+
+		var resp openai.ChatCompletion
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+
+		m := newModelForTest()
+		got, err := m.convertResponse(&resp)
+		if err != nil {
+			t.Fatalf("convertResponse: %v", err)
+		}
+
+		if len(got.Content.Parts) != 2 {
+			t.Fatalf("expected 2 parts (thought + answer), got %d", len(got.Content.Parts))
+		}
+		if !got.Content.Parts[0].Thought {
+			t.Errorf("first part Thought = false, want true")
+		}
+		if got.Content.Parts[0].Text != "User asked for the meaning of life. The canonical joke answer is 42." {
+			t.Errorf("first part text = %q, want reasoning content", got.Content.Parts[0].Text)
+		}
+		if got.Content.Parts[1].Thought {
+			t.Errorf("second part Thought = true, want false (it is the final answer)")
+		}
+		if got.Content.Parts[1].Text != "The answer is 42." {
+			t.Errorf("second part text = %q, want final answer", got.Content.Parts[1].Text)
+		}
+	})
+
+	t.Run("no reasoning_content leaves the response unchanged", func(t *testing.T) {
+		// Sanity check: providers without thinking mode (vanilla GPT-4o,
+		// Ollama, etc.) must keep producing single-part responses. A
+		// regression here would mean every non-reasoning response suddenly
+		// grows a phantom empty Thought part.
+		raw := []byte(`{
+            "id": "chatcmpl-y",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "plain reply"},
+                "finish_reason": "stop"
+            }]
+        }`)
+
+		var resp openai.ChatCompletion
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+
+		m := newModelForTest()
+		got, err := m.convertResponse(&resp)
+		if err != nil {
+			t.Fatalf("convertResponse: %v", err)
+		}
+
+		if len(got.Content.Parts) != 1 {
+			t.Fatalf("expected 1 part, got %d", len(got.Content.Parts))
+		}
+		if got.Content.Parts[0].Thought {
+			t.Errorf("Thought = true, want false for a vanilla response")
+		}
+	})
+
+	t.Run("reasoning_content coexists with a tool call", func(t *testing.T) {
+		// The combined case matters because reasoning models often emit
+		// chain-of-thought *and* a tool call in the same turn. The Part
+		// order must be: thought → text → function call, reflecting the
+		// temporal order the model produced them.
+		raw := []byte(`{
+            "id": "chatcmpl-z",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "deepseek-r1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Looking up weather.",
+                    "reasoning_content": "Need fresh data — call the weather tool.",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"city\":\"Madrid\"}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }`)
+
+		var resp openai.ChatCompletion
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+
+		m := newModelForTest()
+		got, err := m.convertResponse(&resp)
+		if err != nil {
+			t.Fatalf("convertResponse: %v", err)
+		}
+
+		if len(got.Content.Parts) != 3 {
+			t.Fatalf("expected 3 parts (thought + text + tool call), got %d", len(got.Content.Parts))
+		}
+		if !got.Content.Parts[0].Thought || got.Content.Parts[0].Text == "" {
+			t.Errorf("first part should be a thought; got %#v", got.Content.Parts[0])
+		}
+		if got.Content.Parts[1].Thought || got.Content.Parts[1].Text == "" {
+			t.Errorf("second part should be plain text; got %#v", got.Content.Parts[1])
+		}
+		if got.Content.Parts[2].FunctionCall == nil {
+			t.Errorf("third part should be a FunctionCall; got %#v", got.Content.Parts[2])
+		}
+	})
+}
+
+// buildStreamFinalResponse must also surface reasoning_content as a leading
+// Thought part. The implementation path is shared with convertResponse but
+// reads from the accumulator, so a parallel regression test is needed.
+//
+// The accumulator embeds a ChatCompletion by value, so populating
+// acc.ChatCompletion via json.Unmarshal produces the same observable state
+// as a live stream that finished aggregating the chunks.
+func TestBuildStreamFinalResponse_WithReasoningContent(t *testing.T) {
+	t.Run("aggregated stream surfaces reasoning_content", func(t *testing.T) {
+		raw := []byte(`{
+            "id": "chatcmpl-s",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "kimi-k2.6",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Sure, here is the result.",
+                    "reasoning_content": "Streamed chain-of-thought."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}
+        }`)
+
+		var cc openai.ChatCompletion
+		if err := json.Unmarshal(raw, &cc); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		acc := &openai.ChatCompletionAccumulator{ChatCompletion: cc}
+
+		m := newModelForTest()
+		got := m.buildStreamFinalResponse(acc)
+
+		if len(got.Content.Parts) != 2 {
+			t.Fatalf("expected 2 parts, got %d", len(got.Content.Parts))
+		}
+		if !got.Content.Parts[0].Thought {
+			t.Errorf("first part Thought = false, want true")
+		}
+		if got.Content.Parts[0].Text != "Streamed chain-of-thought." {
+			t.Errorf("first part text = %q", got.Content.Parts[0].Text)
+		}
+		if got.Content.Parts[1].Thought {
+			t.Errorf("second part Thought = true, want false")
+		}
+		if got.Content.Parts[1].Text != "Sure, here is the result." {
+			t.Errorf("second part text = %q", got.Content.Parts[1].Text)
+		}
+	})
+}
+
+// convertUsageMetadata must map CompletionTokensDetails.ReasoningTokens to
+// ThoughtsTokenCount. This is the only path through which billing/usage
+// systems downstream (e.g. Langfuse) can see how many hidden reasoning
+// tokens a turn consumed. Dropping the field silently — as the previous
+// implementation did — makes cost dashboards under-count and removes the
+// only signal callers have that a reasoning model actually reasoned.
+func TestConvertUsageMetadata_WithReasoningTokens(t *testing.T) {
+	t.Run("reasoning tokens map to ThoughtsTokenCount", func(t *testing.T) {
+		usage := openai.CompletionUsage{
+			PromptTokens:     10,
+			CompletionTokens: 50,
+			TotalTokens:      60,
+			CompletionTokensDetails: openai.CompletionUsageCompletionTokensDetails{
+				ReasoningTokens: 42,
+			},
+		}
+		got := convertUsageMetadata(usage)
+		if got == nil {
+			t.Fatalf("got nil")
+		}
+		if got.ThoughtsTokenCount != 42 {
+			t.Errorf("ThoughtsTokenCount = %d, want 42", got.ThoughtsTokenCount)
+		}
+		// Ensure the rest of the mapping is unchanged: a regression that
+		// rewrites the field assignments could silently zero one of these.
+		if got.PromptTokenCount != 10 || got.CandidatesTokenCount != 50 || got.TotalTokenCount != 60 {
+			t.Errorf("usage mapping drifted: %#v", got)
+		}
+	})
+
+	t.Run("zero reasoning tokens emit zero ThoughtsTokenCount", func(t *testing.T) {
+		// Providers that don't emit CompletionTokensDetails (Ollama,
+		// vanilla GPT-4o) must keep ThoughtsTokenCount=0. genai's
+		// `omitempty` then drops the field on serialisation so the
+		// observability backends don't see a misleading zero metric.
+		usage := openai.CompletionUsage{
+			PromptTokens:     1,
+			CompletionTokens: 2,
+			TotalTokens:      3,
+		}
+		got := convertUsageMetadata(usage)
+		if got == nil {
+			t.Fatalf("got nil")
+		}
+		if got.ThoughtsTokenCount != 0 {
+			t.Errorf("ThoughtsTokenCount = %d, want 0", got.ThoughtsTokenCount)
+		}
+	})
 }
