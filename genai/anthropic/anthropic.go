@@ -443,7 +443,7 @@ func (m *Model) convertTools(genaiTools []*genai.Tool) ([]anthropic.ToolUnionPar
 					switch req := m["required"].(type) {
 					case []string:
 						inputSchema.Required = req
-					case []interface{}:
+					case []any:
 						strs := make([]string, len(req))
 						for i, v := range req {
 							strs[i] = fmt.Sprint(v)
@@ -578,7 +578,7 @@ func repairMessageHistory(messages []anthropic.MessageParam) []anthropic.Message
 
 	result := make([]anthropic.MessageParam, 0, len(messages))
 
-	for i := 0; i < len(messages); i++ {
+	for i := range messages {
 		msg := messages[i]
 
 		// Check if this assistant message has tool_use blocks

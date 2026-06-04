@@ -257,10 +257,7 @@ func tokenCount(ctx agent.CallbackContext, req *model.LLMRequest) int {
 		calibrated = int(float64(currentHeuristic) * correction)
 	}
 
-	result := calibrated
-	if realTokens > calibrated {
-		result = realTokens
-	}
+	result := max(realTokens, calibrated)
 
 	slog.Debug("ContextGuard [tokenCount]: calibrated estimate",
 		"agent", ctx.AgentName(),
@@ -353,7 +350,7 @@ func summarize(ctx context.Context, llm model.LLM, contents []*genai.Content, pr
 		},
 	}
 
-	var result string
+	var result strings.Builder
 	for resp, err := range llm.GenerateContent(ctx, req, false) {
 		if err != nil {
 			return "", fmt.Errorf("summarization LLM call failed: %w", err)
@@ -361,17 +358,17 @@ func summarize(ctx context.Context, llm model.LLM, contents []*genai.Content, pr
 		if resp != nil && resp.Content != nil {
 			for _, part := range resp.Content.Parts {
 				if part != nil && part.Text != "" {
-					result += part.Text
+					result.WriteString(part.Text)
 				}
 			}
 		}
 	}
 
-	if result == "" {
+	if result.String() == "" {
 		return buildFallbackSummary(contents, previousSummary), nil
 	}
 
-	return result, nil
+	return result.String(), nil
 }
 
 // buildSummarizePrompt assembles the user-facing prompt sent to the LLM for

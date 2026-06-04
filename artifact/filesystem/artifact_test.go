@@ -226,7 +226,7 @@ func TestDeleteAllVersions(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_, _ = svc.Save(ctx, &artifact.SaveRequest{
 			AppName:   "app1",
 			UserID:    "user1",
@@ -261,7 +261,7 @@ func TestDeleteSingleVersion(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_, _ = svc.Save(ctx, &artifact.SaveRequest{
 			AppName:   "app1",
 			UserID:    "user1",

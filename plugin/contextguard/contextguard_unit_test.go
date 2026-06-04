@@ -80,16 +80,16 @@ func newMockCallbackContext(agentName string) *mockCallbackContext {
 	}
 }
 
-func (m *mockCallbackContext) UserContent() *genai.Content            { return nil }
-func (m *mockCallbackContext) InvocationID() string                   { return "inv-1" }
-func (m *mockCallbackContext) AgentName() string                      { return m.agentName }
-func (m *mockCallbackContext) ReadonlyState() session.ReadonlyState   { return m.state }
-func (m *mockCallbackContext) UserID() string                         { return "user-1" }
-func (m *mockCallbackContext) AppName() string                        { return "test-app" }
-func (m *mockCallbackContext) SessionID() string                      { return m.sessionID }
-func (m *mockCallbackContext) Branch() string                         { return "" }
-func (m *mockCallbackContext) Artifacts() agent.Artifacts             { return &mockArtifacts{} }
-func (m *mockCallbackContext) State() session.State                   { return m.state }
+func (m *mockCallbackContext) UserContent() *genai.Content          { return nil }
+func (m *mockCallbackContext) InvocationID() string                 { return "inv-1" }
+func (m *mockCallbackContext) AgentName() string                    { return m.agentName }
+func (m *mockCallbackContext) ReadonlyState() session.ReadonlyState { return m.state }
+func (m *mockCallbackContext) UserID() string                       { return "user-1" }
+func (m *mockCallbackContext) AppName() string                      { return "test-app" }
+func (m *mockCallbackContext) SessionID() string                    { return m.sessionID }
+func (m *mockCallbackContext) Branch() string                       { return "" }
+func (m *mockCallbackContext) Artifacts() agent.Artifacts           { return &mockArtifacts{} }
+func (m *mockCallbackContext) State() session.State                 { return m.state }
 
 type mockArtifacts struct{}
 
@@ -215,7 +215,7 @@ func toolResultContent(name string) *genai.Content {
 
 func makeConversation(turns int) []*genai.Content {
 	contents := make([]*genai.Content, 0, turns*2)
-	for i := 0; i < turns; i++ {
+	for i := range turns {
 		contents = append(contents,
 			textContent("user", fmt.Sprintf("User message %d with some padding text to increase token count", i)),
 			textContent("model", fmt.Sprintf("Model response %d with more text to simulate real content", i)),
@@ -1239,7 +1239,7 @@ func TestWithMaxCompactionAttempts_SetsField(t *testing.T) {
 
 func makeToolOnlyConversation(pairs int) []*genai.Content {
 	contents := make([]*genai.Content, 0, pairs*2)
-	for i := 0; i < pairs; i++ {
+	for i := range pairs {
 		contents = append(contents,
 			toolCallContent(fmt.Sprintf("tool_%d", i)),
 			toolResultContent(fmt.Sprintf("tool_%d", i)),
@@ -1440,7 +1440,7 @@ func TestThresholdStrategy_AllToolCalls_StillCompacts(t *testing.T) {
 	ctx := newMockCallbackContext("agent1")
 
 	var contents []*genai.Content
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		contents = append(contents,
 			toolCallContent(fmt.Sprintf("kubectl_%d", i)),
 			&genai.Content{

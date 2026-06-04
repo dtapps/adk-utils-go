@@ -294,7 +294,7 @@ func TestContextHelpers(t *testing.T) {
 func TestContextHelpers_Concurrent(t *testing.T) {
 	base := context.Background()
 	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -1131,7 +1131,7 @@ func TestSpanEnricher_ConcurrentAccess(t *testing.T) {
 	tp := newTestTP(rec)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()

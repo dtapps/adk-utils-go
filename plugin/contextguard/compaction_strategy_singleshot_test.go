@@ -45,7 +45,7 @@ func kubeAgentConversation(rounds int) []*genai.Content {
 			"2025-01-15T10:30:02Z WARN  [nginx] upstream timed out (110: Connection timed out) while connecting to upstream\n", 50,
 	)
 
-	for i := 0; i < rounds; i++ {
+	for i := range rounds {
 		contents = append(contents,
 			textContent("user", fmt.Sprintf("Check the status of pods in the production namespace, round %d", i)),
 		)
@@ -222,7 +222,7 @@ func mixedConversation() []*genai.Content {
 // with large responses and zero text messages in between.
 func pureToolStorm(pairs int, responseSize int) []*genai.Content {
 	contents := make([]*genai.Content, 0, pairs*2)
-	for i := 0; i < pairs; i++ {
+	for i := range pairs {
 		contents = append(contents,
 			&genai.Content{
 				Role: "model",
@@ -439,7 +439,7 @@ func buildCodingAgentConversation(rounds int) []*genai.Content {
 	)
 
 	var contents []*genai.Content
-	for i := 0; i < rounds; i++ {
+	for i := range rounds {
 		contents = append(contents,
 			textContent("user", fmt.Sprintf("Round %d: Can you fix the middleware auth test? It's returning 401 instead of 200.", i)),
 			textContent("model", fmt.Sprintf("Let me look at the middleware code and the failing test to understand what's happening in round %d.", i)),
@@ -711,7 +711,7 @@ func TestCompactionInvestigation_RetryRoundsAndGiantResponses(t *testing.T) {
 
 		actualAttempts := 0
 
-		for attempt := 0; attempt < attempts; attempt++ {
+		for range attempts {
 			oldContents := req.Contents
 
 			if len(oldContents) == 0 {

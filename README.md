@@ -216,7 +216,7 @@ runnr, _ := runner.New(runner.Config{
 
 ## 依赖环境要求
 
-* Go 1.24+
+* Go 1.26+
 * [Google ADK](https://google.github.io/adk-docs/) v0.5.0+
 
 ## 开源协议
