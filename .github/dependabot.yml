@@ -1,0 +1,12 @@
+version: 2
+
+updates:
+
+  # Go 依赖
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    labels:
+      - "dependencies"
+      - "go"
