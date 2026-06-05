@@ -406,7 +406,11 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 			messages = append(messages, openai.ToolMessage(string(responseJSON), normalizedID))
 
 		case part.FunctionCall != nil:
-			argsJSON, err := json.Marshal(part.FunctionCall.Args)
+			args := part.FunctionCall.Args
+			if args == nil {
+				args = make(map[string]any)
+			}
+			argsJSON, err := json.Marshal(args)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function args: %w", err)
 			}
