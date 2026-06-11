@@ -473,7 +473,21 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 		// Text is a normal thinking block (echo Text + signature); a
 		// thought Part with empty Text carries a redacted_thinking blob in
 		// ThoughtSignature. See convertResponse for the inverse mapping.
+		//
+		// Anthropic only accepts thinking/redacted_thinking blocks inside
+		// assistant messages and rejects the whole request with a 400
+		// otherwise. Thought parts can legitimately appear under a user
+		// role: the ADK contents processor rewrites events authored by a
+		// DIFFERENT agent as user-role "For context:" content
+		// (ConvertForeignEvent) and passes non-text parts — including
+		// signature-only thought parts — through verbatim. Those foreign
+		// reasoning blocks are useless as context (their signatures belong
+		// to another conversation anyway), so drop them instead of letting
+		// the API bounce the request.
 		if part.Thought {
+			if role != anthropic.MessageParamRoleAssistant {
+				continue
+			}
 			if part.Text != "" {
 				blocks = append(blocks, anthropic.ContentBlockParamUnion{
 					OfThinking: &anthropic.ThinkingBlockParam{

@@ -199,3 +199,53 @@ func TestThinkingBlockRoundTrip(t *testing.T) {
 		t.Errorf("block 2 should be a text block")
 	}
 }
+
+// Thought parts under a user role must be dropped, not converted.
+// The ADK contents processor rewrites another agent's events as
+// user-role "For context:" content and passes signature-only thought
+// parts through verbatim; Anthropic rejects any request that carries
+// thinking/redacted_thinking blocks outside assistant messages
+// ("thinking blocks may only be in `assistant` messages", HTTP 400).
+func TestConvertContentToMessage_DropsThoughtPartsInUserRole(t *testing.T) {
+	m := &Model{modelName: "claude-opus-4-8"}
+
+	msg, err := m.convertContentToMessage(&genai.Content{
+		Role: "user",
+		Parts: []*genai.Part{
+			{Text: "For context:"},
+			{Text: "reasoning from another agent", Thought: true, ThoughtSignature: []byte("sig-foreign")},
+			{Thought: true, ThoughtSignature: []byte("redacted-foreign")},
+			{Text: "[coordinator-opus] said: hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("convertContentToMessage: %v", err)
+	}
+	if msg == nil {
+		t.Fatal("message with text parts was dropped entirely")
+	}
+	if len(msg.Content) != 2 {
+		t.Fatalf("expected 2 text blocks, got %d", len(msg.Content))
+	}
+	for i, b := range msg.Content {
+		if b.OfThinking != nil || b.OfRedactedThinking != nil {
+			t.Errorf("block %d: thinking block leaked into a user message", i)
+		}
+		if b.OfText == nil {
+			t.Errorf("block %d: expected a text block", i)
+		}
+	}
+
+	// A user content carrying ONLY foreign thought parts must vanish
+	// (nil message), not become an empty message Anthropic also rejects.
+	msg, err = m.convertContentToMessage(&genai.Content{
+		Role:  "user",
+		Parts: []*genai.Part{{Thought: true, ThoughtSignature: []byte("redacted-only")}},
+	})
+	if err != nil {
+		t.Fatalf("convertContentToMessage (thought-only): %v", err)
+	}
+	if msg != nil {
+		t.Fatalf("thought-only user content should produce no message, got %+v", msg)
+	}
+}
