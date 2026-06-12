@@ -590,13 +590,26 @@ func (m *Model) convertResponse(resp *anthropic.Message) (*model.LLMResponse, er
 		}
 	}
 
-	// Convert usage metadata
+	// Convert usage metadata.
+	//
+	// With prompt caching active (the default, see caching.go) Anthropic
+	// reports the prompt in three buckets: InputTokens is only the
+	// un-cached suffix; the cached prefix goes in CacheReadInputTokens
+	// and CacheCreationInputTokens. The model still processed the full
+	// prompt, so PromptTokenCount is the sum of the three. Without
+	// caching both cache fields are zero and the sum is plain
+	// InputTokens. CachedContentTokenCount carries the read-hit portion
+	// for cost-aware consumers.
 	var usageMetadata *genai.GenerateContentResponseUsageMetadata
-	if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
+	promptTokens := resp.Usage.InputTokens +
+		resp.Usage.CacheReadInputTokens +
+		resp.Usage.CacheCreationInputTokens
+	if promptTokens > 0 || resp.Usage.OutputTokens > 0 {
 		usageMetadata = &genai.GenerateContentResponseUsageMetadata{
-			PromptTokenCount:     int32(resp.Usage.InputTokens),
-			CandidatesTokenCount: int32(resp.Usage.OutputTokens),
-			TotalTokenCount:      int32(resp.Usage.InputTokens + resp.Usage.OutputTokens),
+			PromptTokenCount:        int32(promptTokens),
+			CachedContentTokenCount: int32(resp.Usage.CacheReadInputTokens),
+			CandidatesTokenCount:    int32(resp.Usage.OutputTokens),
+			TotalTokenCount:         int32(promptTokens + resp.Usage.OutputTokens),
 		}
 	}
 
